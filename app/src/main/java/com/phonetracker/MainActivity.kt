@@ -9,6 +9,10 @@ import android.app.TimePickerDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.location.LocationManager
@@ -36,7 +40,7 @@ class MainActivity : Activity() {
     private lateinit var statusText: TextView
     private lateinit var detailText: TextView
     private lateinit var startButton: Button
-    private lateinit var followButton: Button
+    private lateinit var backgroundButton: Button
     private lateinit var filters: LinearLayout
     private lateinit var playback: LinearLayout
     private lateinit var slider: SeekBar
@@ -44,9 +48,19 @@ class MainActivity : Activity() {
     private lateinit var playButton: Button
     private lateinit var records: LinearLayout
     private lateinit var recordsScroll: ScrollView
-    private lateinit var rangeButton: Button
+    private val rangeButtons = mutableMapOf<Long, Button>()
+    private lateinit var customRangeButton: Button
     private lateinit var root: LinearLayout
+    private lateinit var backButton: Button
+    private val tabButtons = mutableMapOf<String, Button>()
+    private val navigationStack = arrayListOf<String>()
+    private val backCallback = android.window.OnBackInvokedCallback { navigateBack() }
     private var marker: Marker? = null
+    private var historyCursor: Marker? = null
+    private var cursorPoint: TrackPoint? = null
+    private var cursorDragging = false
+    private var cursorPoints = emptyList<TrackPoint>()
+    private var cursorIcon: BitmapDescriptor? = null
     private var circle: Circle? = null
     private val lines = mutableListOf<Polyline>()
     private var animator: ValueAnimator? = null
@@ -55,7 +69,7 @@ class MainActivity : Activity() {
     private var resumed = false
     private var destroyed = false
     private var queryVersion = 0
-    private var hours = 24L
+    private var hours = 6L
     private var customStart: Long? = null
     private var customEnd: Long? = null
     private var history = emptyList<TrackPoint>()
@@ -72,6 +86,7 @@ class MainActivity : Activity() {
     private var requestStart = false
     private val preferences by lazy { getSharedPreferences("phone_location_recording", 0) }
     private val database by lazy { LocationTrackerStore.get(this) }
+    private val mapExporter by lazy { MapExporter(this) }
     private val format = SimpleDateFormat("MM/dd HH:mm:ss", Locale.TAIWAN)
     private val tick = object : Runnable {
         override fun run() {
@@ -83,7 +98,7 @@ class MainActivity : Activity() {
                     selectedTime = minOf(next, history.last().time)
                     if (next >= history.last().time) playing = false
                     drawHistory()
-                } else if (selectedTime == null && !historyLoading && System.currentTimeMillis() - lastQueryAt > 10000) loadHistory()
+                } else if (selectedTime == null && !cursorDragging && !historyLoading && System.currentTimeMillis() - lastQueryAt > 10000) loadHistory()
             } else if (mode == "records" && beforeId == 0L && System.currentTimeMillis() - lastQueryAt > 10000) loadRecords()
             handler.postDelayed(this, 1000)
         }
@@ -91,9 +106,11 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        hours = savedInstanceState?.getLong("hours", 24) ?: 24
+        mapExporter.restoreState(savedInstanceState)
+        hours = savedInstanceState?.getLong("hours", 6) ?: 6
         customStart = savedInstanceState?.getLong("start")?.takeIf { it > 0 }
         customEnd = savedInstanceState?.getLong("end")?.takeIf { it > 0 }
+        savedInstanceState?.getStringArrayList("navigation")?.let { navigationStack.addAll(it) }
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.rgb(248, 250, 252))
@@ -109,18 +126,31 @@ class MainActivity : Activity() {
             }
             insets
         }
-        root.addView(text("PhoneTracker", 24).apply { setTypeface(null, Typeface.BOLD); setPadding(dp(18), dp(12), dp(18), dp(4)) })
+        val heading = row()
+        backButton = button("返回") { navigateBack() }
+        heading.addView(backButton)
+        heading.addView(text("PhoneTracker", 24).apply { setTypeface(null, Typeface.BOLD); setPadding(dp(18), dp(12), dp(18), dp(4)) }, weight())
+        root.addView(heading)
         statusText = text("等待定位", 14).apply { setPadding(dp(18), 0, dp(18), dp(6)) }
         root.addView(statusText)
         val controls = row()
         startButton = button("開始記錄") { toggleRecording() }
-        followButton = button("跟隨位置") { following = true; positionTimestamp = 0; updateLive() }
-        controls.addView(startButton, weight()); controls.addView(followButton, weight())
+        controls.addView(startButton, weight())
+        backgroundButton = button("背景執行") {
+            if (LocationTrackerService.running) finishAndRemoveTask()
+            else Toast.makeText(this, "請先開始記錄，再切換到背景執行", Toast.LENGTH_SHORT).show()
+        }
+        controls.addView(backgroundButton, weight())
         root.addView(controls)
         filters = row()
-        rangeButton = button("最近 24 小時") { chooseRange() }
-        filters.addView(rangeButton, weight())
-        filters.addView(button("指定起訖") { chooseCustomRange() }, weight())
+        for (duration in listOf(1L, 3L, 6L)) {
+            val range = button("${duration} 小時") { selectRange(duration) }
+            range.contentDescription = "最近 $duration 小時"
+            rangeButtons[duration] = range
+            filters.addView(range, weight())
+        }
+        customRangeButton = button("指定起訖") { chooseCustomRange() }
+        filters.addView(customRangeButton, weight())
         root.addView(filters)
         detailText = text("允許精確定位並開啟 GPS 後開始記錄", 12).apply { setPadding(dp(18), dp(6), dp(18), dp(6)) }
         root.addView(detailText)
@@ -159,9 +189,19 @@ class MainActivity : Activity() {
         })
         root.addView(playback)
         val tabs = row()
-        for ((id, title) in listOf("live" to "即時位置", "history" to "歷史軌跡", "records" to "位置記錄"))
-            tabs.addView(button(title) { switchMode(id) }, weight())
-        root.addView(tabs)
+        for ((id, title) in listOf("live" to "即時位置", "history" to "歷史軌跡", "export" to "匯出地圖")) {
+            val tab = button(title) {
+                if (id == "export") exportMap()
+                else {
+                    if (id == "live") { following = true; positionTimestamp = 0 }
+                    if (id != mode) { navigationStack.add(mode); switchMode(id) }
+                    else if (id == "live") updateLive()
+                }
+            }
+            tabButtons[id] = tab
+            tabs.addView(tab, weight())
+        }
+        root.addView(tabs, 3, LinearLayout.LayoutParams(-1, dp(56)))
         setContentView(root)
         root.requestApplyInsets()
         mapView.getMapAsync { googleMap ->
@@ -171,29 +211,90 @@ class MainActivity : Activity() {
             googleMap.setOnCameraMoveStartedListener { reason ->
                 if (reason == GoogleMap.OnCameraMoveStartedListener.REASON_GESTURE) following = false
             }
+            googleMap.setOnMarkerClickListener { clicked ->
+                if (mode == "history") {
+                    clicked.hideInfoWindow()
+                    cursorPoint?.let { playbackLabel.text = "標定時間 ${cursorTime(it)}" }
+                    true
+                } else false
+            }
+            googleMap.setOnMarkerDragListener(object : GoogleMap.OnMarkerDragListener {
+                override fun onMarkerDragStart(dragged: Marker) {
+                    if (dragged != historyCursor) return
+                    cursorDragging = true; playing = false
+                    playButton.text = "播放"
+                    dragged.hideInfoWindow()
+                }
+                override fun onMarkerDrag(dragged: Marker) {
+                    if (dragged == historyCursor) snapHistoryCursor(dragged, false)
+                }
+                override fun onMarkerDragEnd(dragged: Marker) {
+                    if (dragged != historyCursor) return
+                    snapHistoryCursor(dragged, true)
+                    cursorDragging = false
+                }
+            })
             googleMap.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(23.7, 121.0), 7f))
             if (mode == "history") drawHistory() else updateLive()
         }
-        switchMode(savedInstanceState?.getString("mode") ?: "live")
+        navigationStack.removeAll { it != "live" && it != "history" }
+        switchMode(savedInstanceState?.getString("mode")?.takeIf { it == "live" || it == "history" } ?: "live")
     }
 
     private fun switchMode(next: String) {
         queryVersion++; historyLoading = false; mode = next; playing = false; selectedTime = null
+        tabButtons.forEach { (id, tab) ->
+            tab.isSelected = id == mode
+            tab.setTextColor(if (id == mode) Color.WHITE else blue)
+            (tab.background as GradientDrawable).setColor(if (id == mode) blue else Color.rgb(239, 246, 255))
+        }
+        backButton.visibility = if (navigationStack.isNotEmpty() || mode != "live") View.VISIBLE else View.GONE
+        if (Build.VERSION.SDK_INT >= 33) {
+            onBackInvokedDispatcher.unregisterOnBackInvokedCallback(backCallback)
+            if (navigationStack.isNotEmpty() || mode != "live")
+                onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, backCallback)
+        }
         animator?.cancel(); animator = null
+        cursorPoint = null; cursorDragging = false; cursorPoints = emptyList()
         clearMap()
         mapView.visibility = if (mode == "records") View.GONE else View.VISIBLE
         recordsScroll.visibility = if (mode == "records") View.VISIBLE else View.GONE
         filters.visibility = if (mode == "history") View.VISIBLE else View.GONE
         playback.visibility = if (mode == "history") View.VISIBLE else View.GONE
-        followButton.visibility = if (mode == "live") View.VISIBLE else View.GONE
         lastQueryAt = 0
-        rangeButton.text = if (customStart == null) "最近 $hours 小時" else "選擇最近時段"
+        updateRangeButtons()
         when (mode) {
             "history" -> { fitHistory = true; loadHistory() }
             "records" -> { beforeId = 0; pageStack.clear(); loadRecords() }
             else -> { positionTimestamp = 0; updateLive() }
         }
     }
+    private fun navigateBack() {
+        if (navigationStack.isNotEmpty()) switchMode(navigationStack.removeAt(navigationStack.lastIndex))
+        else if (mode != "live") switchMode("live")
+        else finish()
+    }
+    private fun exportMap() {
+        val googleMap = map
+        if (googleMap == null || historyLoading || cursorDragging) {
+            Toast.makeText(this, "請等待地圖載入完成後再匯出", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (mapExporter.busy) return
+        playing = false
+        playButton.text = "播放"
+        val caption = listOf("PhoneTracker · ${if (mode == "history") "歷史軌跡" else "即時位置"}",
+            detailText.text.toString(), if (mode == "history") playbackLabel.text.toString() else "")
+            .filter { it.isNotBlank() }.joinToString("\n")
+        mapExporter.capture(googleMap, caption)
+    }
+    @Deprecated("Android activity result callback")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        mapExporter.onActivityResult(requestCode, resultCode, data)
+    }
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() { navigateBack() }
     private fun toggleRecording() {
         if (LocationTrackerService.running) {
             preferences.edit().putBoolean("enabled", false).apply()
@@ -238,12 +339,16 @@ class MainActivity : Activity() {
     private fun updateLive() {
         if (destroyed) return
         startButton.text = if (LocationTrackerService.running) "停止記錄" else "開始記錄"
+        startButton.contentDescription = startButton.text
+        backgroundButton.isEnabled = LocationTrackerService.running
+        backgroundButton.alpha = if (backgroundButton.isEnabled) 1f else 0.45f
         statusText.text = (if (LocationTrackerService.running) "● 記錄中 · " else "○ ") + LocationTrackerService.status
         if (mode != "live") return
         val live = try { JSONObject(LocationTrackerService.liveJson) } catch (_: Exception) { JSONObject() }
         val position = live.optJSONObject("position")
         if (position == null) {
-            detailText.text = if (!BuildConfig.GOOGLE_MAPS_CONFIGURED) "尚未設定 Google Maps 金鑰；GPS 記錄仍可使用"
+            detailText.text = if (!LocationTrackerService.running) "即時位置尚未啟動，請按「開始記錄」取得手機位置"
+                else if (!BuildConfig.GOOGLE_MAPS_CONFIGURED) "尚未設定 Google Maps 金鑰；GPS 記錄仍可使用"
                 else "等待合格定位 · 精度需 ≤ 30 m，高速需 < 50 m"
             return
         }
@@ -251,7 +356,7 @@ class MainActivity : Activity() {
         val speed = position.optDouble("speedKmh", Double.NaN)
         detailText.text = "${format.format(Date(position.optLong("timestamp")))} · 精度 ${position.optDouble("accuracy").toInt()} m · " +
             (if (speed.isFinite()) String.format(Locale.TAIWAN, "%.1f km/h", speed) else "速度未知") +
-            "\n已保存 ${live.optInt("saved")} 筆 · 間隔 ${live.optInt("intervalSeconds", 5)} 秒" +
+            "\n已保存 ${live.optInt("saved")} 筆 · 間隔 ${live.optInt("intervalSeconds", 30)} 秒" +
             (if (age > 3) " · 最後位置已過期" else "")
         val googleMap = map ?: return
         val target = LatLng(position.getDouble("latitude"), position.getDouble("longitude"))
@@ -285,12 +390,19 @@ class MainActivity : Activity() {
                 if (googleMap.cameraPosition.zoom < 14) 17f else googleMap.cameraPosition.zoom))
         }
     }
-    private fun chooseRange() {
-        val choices = longArrayOf(1, 3, 6, 12, 24)
-        AlertDialog.Builder(this).setTitle("顯示最近的軌跡").setItems(choices.map { "$it 小時" }.toTypedArray()) { _, index ->
-            hours = choices[index]; customStart = null; customEnd = null; selectedTime = null; playing = false
-            rangeButton.text = "最近 $hours 小時"; fitHistory = true; loadHistory()
-        }.show()
+    private fun selectRange(duration: Long) {
+        hours = duration; customStart = null; customEnd = null; selectedTime = null; playing = false
+        cursorPoint = null
+        updateRangeButtons(); fitHistory = true; loadHistory()
+    }
+    private fun updateRangeButtons() {
+        val choices = rangeButtons.map { (duration, button) -> button to (customStart == null && hours == duration) } +
+            (customRangeButton to (customStart != null))
+        choices.forEach { (button, selected) ->
+            button.isSelected = selected
+            button.setTextColor(if (selected) Color.WHITE else blue)
+            (button.background as GradientDrawable).setColor(if (selected) blue else Color.rgb(239, 246, 255))
+        }
     }
     private fun chooseCustomRange() {
         pickDateTime("開始時間", customStart ?: System.currentTimeMillis() - hours * 3600000) { start ->
@@ -299,7 +411,8 @@ class MainActivity : Activity() {
                     Toast.makeText(this, "結束須晚於開始，最長 240 小時", Toast.LENGTH_LONG).show()
                 } else {
                     customStart = start; customEnd = end; selectedTime = null; playing = false
-                    rangeButton.text = "選擇最近時段"; fitHistory = true; loadHistory()
+                    cursorPoint = null
+                    updateRangeButtons(); fitHistory = true; loadHistory()
                 }
             }
         }
@@ -317,6 +430,7 @@ class MainActivity : Activity() {
         picker.setTitle(title); picker.show()
     }
     private fun loadHistory() {
+        if (cursorDragging) return
         val version = ++queryVersion
         lastQueryAt = System.currentTimeMillis(); historyLoading = true
         val end = customEnd ?: lastQueryAt
@@ -339,7 +453,7 @@ class MainActivity : Activity() {
         }
     }
     private fun drawHistory() {
-        if (mode != "history") return
+        if (mode != "history" || cursorDragging) return
         val visible = if (selectedTime == null) history else history.takeWhile { it.time <= selectedTime!! }
         val now = System.currentTimeMillis()
         val end = customEnd ?: now
@@ -369,6 +483,17 @@ class MainActivity : Activity() {
                 .title(if (selectedTime == null) "最後手機位置" else "回放手機位置")
                 .snippet(format.format(Date(last.time))).icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE)))
         }
+        cursorPoints = HistoryGeometry.segments(visible, maxPoints = 8000).flatten()
+        val chosen = if (selectedTime != null) cursorPoints.lastOrNull()
+            else cursorPoints.firstOrNull { it.id == cursorPoint?.id } ?: cursorPoints.firstOrNull()
+        chosen?.let { point ->
+            cursorPoint = point
+            playbackLabel.text = "標定時間 ${cursorTime(point)} · 長按三角形可拖動"
+            historyCursor = googleMap.addMarker(MarkerOptions()
+                .position(LatLng(point.latitude, point.longitude)).icon(historyCursorIcon())
+                .anchor(0.5f, 1f).draggable(true).zIndex(10f)
+                .title(cursorTime(point)))
+        }
         if (fitHistory && history.isNotEmpty()) {
             fitHistory = false
             mapView.post {
@@ -383,6 +508,37 @@ class MainActivity : Activity() {
             }
         }
     }
+    private fun cursorTime(point: TrackPoint) = SimpleDateFormat("HH:mm:ss", Locale.TAIWAN).format(Date(point.time))
+    private fun historyCursorIcon(): BitmapDescriptor {
+        cursorIcon?.let { return it }
+        val size = dp(32)
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val triangle = Path().apply {
+            moveTo(size * 0.12f, size * 0.15f); lineTo(size * 0.88f, size * 0.15f)
+            lineTo(size * 0.5f, size * 0.95f); close()
+        }
+        val canvas = Canvas(bitmap)
+        canvas.drawPath(triangle, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(234, 88, 12) })
+        canvas.drawPath(triangle, Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = dp(2).toFloat()
+        })
+        return BitmapDescriptorFactory.fromBitmap(bitmap).also { cursorIcon = it }
+    }
+    private fun snapHistoryCursor(dragged: Marker, finished: Boolean) {
+        val projection = map?.projection ?: return
+        val target = projection.toScreenLocation(dragged.position)
+        val point = cursorPoints.minByOrNull {
+            val screen = projection.toScreenLocation(LatLng(it.latitude, it.longitude))
+            val dx = (screen.x - target.x).toDouble(); val dy = (screen.y - target.y).toDouble()
+            dx * dx + dy * dy
+        } ?: return
+        cursorPoint = point
+        dragged.title = cursorTime(point)
+        playbackLabel.text = "標定時間 ${cursorTime(point)}"
+        if (finished) {
+            dragged.position = LatLng(point.latitude, point.longitude)
+        }
+    }
     private fun loadRecords() {
         val version = ++queryVersion
         val before = beforeId
@@ -392,7 +548,7 @@ class MainActivity : Activity() {
                 val page = database.page(before)
                 runOnUiThread {
                     if (destroyed || version != queryVersion || mode != "records") return@runOnUiThread
-                    detailText.text = "共 ${page.total} 筆 · 每頁 50 筆 · 最多保留 80,000 筆"
+                    detailText.text = "共 ${page.total} 筆 · 每頁 50 筆 · 最多保留 ${String.format(Locale.TAIWAN, "%,d", LocationTrackerStore.MAX_RECORDS)} 筆"
                     records.removeAllViews()
                     val navigation = row()
                     navigation.addView(button("最新") { beforeId = 0; pageStack.clear(); loadRecords() }, weight())
@@ -415,7 +571,7 @@ class MainActivity : Activity() {
             } catch (_: Exception) { runOnUiThread { if (!destroyed && version == queryVersion) detailText.text = "位置記錄讀取失敗，請重新開啟分頁" } }
         }
     }
-    private fun clearMap() { map?.clear(); marker = null; circle = null; lines.clear() }
+    private fun clearMap() { map?.clear(); marker = null; historyCursor = null; circle = null; lines.clear() }
     private fun text(value: String, size: Int) = TextView(this).apply { text = value; textSize = size.toFloat(); setTextColor(ink) }
     private fun button(value: String, action: () -> Unit) = Button(this).apply {
         text = value; textSize = 13f; isAllCaps = false; minHeight = dp(48)
@@ -440,10 +596,12 @@ class MainActivity : Activity() {
     override fun onStop() { mapView.onStop(); super.onStop() }
     override fun onDestroy() {
         destroyed = true; queryVersion++; handler.removeCallbacks(tick); animator?.cancel()
-        worker.shutdown(); mapView.onDestroy(); super.onDestroy()
+        worker.shutdown(); mapExporter.close(); mapView.onDestroy(); super.onDestroy()
     }
     override fun onLowMemory() { super.onLowMemory(); mapView.onLowMemory() }
     override fun onSaveInstanceState(outState: Bundle) {
+        mapExporter.saveState(outState)
+        outState.putStringArrayList("navigation", navigationStack)
         outState.putString("mode", mode); outState.putLong("hours", hours)
         customStart?.let { outState.putLong("start", it) }; customEnd?.let { outState.putLong("end", it) }
         val mapState = Bundle(); mapView.onSaveInstanceState(mapState); outState.putBundle("map", mapState)

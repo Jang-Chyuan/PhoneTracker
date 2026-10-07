@@ -21,7 +21,7 @@ class DrivingPipelineTest {
       t * 1000, (kmh / 3.6).toFloat(), speedAccuracy = 0.2f)
 
   @Test fun cityAndHighwayDrivingProduceAdaptiveWritesWithoutZeroing() {
-    for (kmh in listOf(30.0, 60.0, 120.0)) {
+    for (kmh in listOf(15.0, 20.0, 30.0, 60.0, 120.0)) {
       val pipeline = LocationPipeline()
       val saved = mutableListOf<LocationSample>()
       for (t in 1L..61L) {
@@ -35,7 +35,7 @@ class DrivingPipelineTest {
           saved.add(it); pipeline.written(it, sample.elapsedNanos)
         }
       }
-      val interval = if (kmh > 20) 1 else 3
+      val interval = if (kmh > 20) 1 else 5
       assertEquals(60 / interval + 1, saved.size)
       assertTrue(saved.zipWithNext().all { (a, b) -> b.timestamp - a.timestamp == interval * 1000L })
       assertEquals(0, pipeline.rejected)

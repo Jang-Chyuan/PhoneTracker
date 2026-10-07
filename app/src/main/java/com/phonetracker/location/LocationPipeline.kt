@@ -25,11 +25,11 @@ internal class LocationPipeline {
   private val motion = MotionDetector()
   private var stationaryCoordinate: Pair<Double, Double>? = null
   val intervalSeconds: Int get() {
-    val speed = latest?.rawSpeed?.takeIf { it.isFinite() && it >= 0 } ?: return 5
+    val speed = latest?.rawSpeed?.takeIf { it.isFinite() && it >= 0 } ?: return 30
     return when {
       isFastLocation(speed) -> 1
-      speed > 10f / 3.6f -> 3
-      else -> 5
+      speed > 10f / 3.6f -> 5
+      else -> 30
     }
   }
   fun accept(sample: LocationSample, now: Long): Boolean {

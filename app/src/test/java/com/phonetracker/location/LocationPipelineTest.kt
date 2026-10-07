@@ -17,19 +17,19 @@ class LocationPipelineTest {
     assertEquals(25.00003, slow.latest!!.rawLatitude, 1e-8)
     assertEquals(10f, slow.latest!!.accuracy)
   }
-  @Test fun writesEveryFiveSecondsAndNeverReplaysAnOldFix() {
+  @Test fun writesEveryThirtySecondsAndNeverReplaysAnOldFix() {
     val pipe = LocationPipeline()
-    for (i in 1L..11L) {
+    for (i in 1L..61L) {
       val now = i * 1_000_000_000L
       pipe.accept(sample(i), now)
       val candidate = pipe.candidate(now)
-      if (i in listOf(1L, 6L, 11L)) { assertNotNull(candidate); pipe.written(candidate!!, now) }
+      if (i in listOf(1L, 31L, 61L)) { assertNotNull(candidate); pipe.written(candidate!!, now) }
       else assertNull(candidate)
     }
-    assertNull(pipe.candidate(20_000_000_000L))
+    assertNull(pipe.candidate(100_000_000_000L))
   }
   @Test fun adaptiveBoundariesAccelerationAndDeceleration() {
-    for ((kmh, interval) in listOf(0f to 5, 10f to 5, 10.1f to 3, 20f to 3, 20.1f to 1, 60f to 1)) {
+    for ((kmh, interval) in listOf(0f to 30, 10f to 30, 10.1f to 5, 20f to 5, 20.1f to 1, 60f to 1)) {
       val pipe = LocationPipeline()
       pipe.accept(sample(1, speed = kmh / 3.6f), 1_000_000_000L)
       assertEquals(interval, pipe.intervalSeconds)
@@ -45,11 +45,13 @@ class LocationPipelineTest {
     pipe.written(fast, 22_000_000_000L)
     assertNull(pipe.candidate(23_000_000_000L)) // Never duplicate the saved sample.
     pipe.accept(sample(23, speed = 0f), 23_000_000_000L)
-    assertEquals(5, pipe.intervalSeconds)
+    assertEquals(30, pipe.intervalSeconds)
     assertNull(pipe.candidate(23_000_000_000L))
     pipe.accept(sample(27, speed = null), 27_000_000_000L)
-    assertEquals(5, pipe.intervalSeconds)
-    assertNotNull(pipe.candidate(27_000_000_000L))
+    assertEquals(30, pipe.intervalSeconds)
+    assertNull(pipe.candidate(27_000_000_000L))
+    pipe.accept(sample(52, speed = null), 52_000_000_000L)
+    assertNotNull(pipe.candidate(52_000_000_000L))
   }
   @Test fun rejectsBadAccuracyStaleAndJumpingFixesWithoutConsumingWriteSlot() {
     val pipe = LocationPipeline()

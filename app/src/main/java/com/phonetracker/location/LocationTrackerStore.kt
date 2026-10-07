@@ -11,13 +11,14 @@ data class TrackPage(val points: List<TrackPoint>, val total: Long, val hasMore:
 data class TrackRange(val points: List<TrackPoint>, val total: Long, val truncated: Boolean)
 
 /** The background writer and screen share one SQLite owner, separate from DogTracker. */
-class LocationTrackerStore private constructor(context: Context) : SQLiteOpenHelper(context, "phonetracker.sqlite", null, 1) {
+class LocationTrackerStore private constructor(context: Context) : SQLiteOpenHelper(context, "phonetracker.sqlite", null, 2) {
     companion object {
         @Volatile private var instance: LocationTrackerStore? = null
         fun get(context: Context): LocationTrackerStore = instance ?: synchronized(this) {
             instance ?: LocationTrackerStore(context.applicationContext).also { instance = it }
         }
-        private const val TRIM = "DELETE FROM phone_locations WHERE id IN (SELECT id FROM phone_locations ORDER BY recorded_at DESC,id DESC LIMIT -1 OFFSET 80000)"
+        const val MAX_RECORDS = 80_000
+        private const val TRIM = "DELETE FROM phone_locations WHERE id IN (SELECT id FROM phone_locations ORDER BY recorded_at DESC,id DESC LIMIT -1 OFFSET $MAX_RECORDS)"
     }
     override fun onConfigure(db: SQLiteDatabase) { db.enableWriteAheadLogging() }
     override fun onCreate(db: SQLiteDatabase) {
@@ -30,7 +31,9 @@ class LocationTrackerStore private constructor(context: Context) : SQLiteOpenHel
             display_location_at INTEGER NOT NULL)""")
         db.execSQL("CREATE INDEX idx_phone_location_time ON phone_locations(recorded_at,id)")
     }
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) db.execSQL(TRIM)
+    }
     @Synchronized internal fun save(location: LocationSample, session: String, display: DisplayLocation? = null) {
         val values = ContentValues().apply {
             put("recorded_at", System.currentTimeMillis()); put("location_at", location.timestamp)
@@ -68,7 +71,7 @@ class LocationTrackerStore private constructor(context: Context) : SQLiteOpenHel
     }
     @Synchronized fun range(since: Long, until: Long): TrackRange {
         require(since < until)
-        // Bound screen memory; the database retains all 80,000 points.
+        // Bound screen memory; the database retains up to MAX_RECORDS points.
         val points = query("WHERE recorded_at>=? AND recorded_at<?", arrayOf(since.toString(), until.toString()), "recorded_at DESC,id DESC", 8001)
         return TrackRange(points.take(8000).reversed(), count(since, until), points.size > 8000)
     }

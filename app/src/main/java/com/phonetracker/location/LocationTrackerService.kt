@@ -12,6 +12,8 @@ import com.phonetracker.MainActivity
 import com.phonetracker.R
 import org.json.JSONObject
 import java.util.UUID
+import java.io.FileDescriptor
+import java.io.PrintWriter
 
 /** Native acquisition and storage continue without a mounted React screen. */
 class LocationTrackerService : Service(), LocationListener {
@@ -31,9 +33,12 @@ class LocationTrackerService : Service(), LocationListener {
   private val sessionId = UUID.randomUUID().toString()
   private var saved = 0
   private var writeErrors = 0
+  private var wakeLock: PowerManager.WakeLock? = null
+  private var wakeRenewAt = 0L
   private val tick = object : Runnable {
     override fun run() {
       if (stopped) return
+      keepWriterAwake()
       val now = SystemClock.elapsedRealtimeNanos()
       val sample = pipeline.candidate(now)
       var writeFailed = false
@@ -82,26 +87,45 @@ class LocationTrackerService : Service(), LocationListener {
     }
     // A queued automatic start must not undo a later explicit stop.
     if (!preferences.getBoolean("enabled", true)) { stopSelf(); return START_NOT_STICKY }
-    if (running) return START_NOT_STICKY
+    if (running) return START_STICKY
     try {
       val launch = PendingIntent.getActivity(this, ID, Intent(this, MainActivity::class.java), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
       val stop = PendingIntent.getService(this, ID, Intent(this, javaClass).setAction("STOP"), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
       startForeground(ID, NotificationCompat.Builder(this, CHANNEL).setSmallIcon(R.drawable.ic_location)
-        .setContentTitle("PhoneTracker 位置記錄").setContentText("約每秒 GPS 定位；> 20 km/h 時每秒保存，精度需 < 50 m")
+        .setContentTitle("PhoneTracker 背景位置記錄").setContentText("≤ 10 km/h 每 30 秒；> 10～20 每 5 秒；> 20 每秒保存")
         .setContentIntent(launch).setOngoing(true).addAction(0, "停止記錄", stop).build())
       val precise = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
       check(precise) { "請允許精確位置" }
       val providers = listOf(LocationManager.GPS_PROVIDER).filter { manager.isProviderEnabled(it) }
       check(providers.isNotEmpty()) { "請開啟手機定位服務" }
       for (provider in providers) manager.requestLocationUpdates(provider, 1000L, 0f, this, worker.looper)
+      wakeLock = getSystemService(PowerManager::class.java)
+        .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PhoneTracker:location-writer")
+        .apply { setReferenceCounted(false) }
+      keepWriterAwake()
       running = true
       status = "等待合格定位：≤ 30 m；> 20 km/h 時 < 50 m"
       handler.post(tick)
     } catch (_: Exception) {
       status = "無法開始記錄，請允許精確位置並開啟 GPS"
       stopSelf()
+      return START_NOT_STICKY
     }
-    return START_NOT_STICKY
+    return START_STICKY
+  }
+  private fun keepWriterAwake() {
+    val lock = wakeLock ?: return
+    val now = SystemClock.elapsedRealtime()
+    // Renew only while recording. A timeout releases the lock if the writer stalls.
+    if (!lock.isHeld || now >= wakeRenewAt) {
+      lock.acquire(10 * 60_000L)
+      wakeRenewAt = now + 5 * 60_000L
+    }
+  }
+  override fun dump(fd: FileDescriptor?, writer: PrintWriter, args: Array<out String>?) {
+    writer.println("PhoneTracker running=$running saved=$saved received=${pipeline.received} writeErrors=$writeErrors")
+    writer.println("lastLocationAt=${pipeline.latest?.timestamp} intervalSeconds=${pipeline.intervalSeconds}")
+    writer.println("wakeLockHeld=${wakeLock?.isHeld == true}")
   }
   override fun onLocationChanged(location: Location) {
     if (stopped) return
@@ -122,6 +146,8 @@ class LocationTrackerService : Service(), LocationListener {
   override fun onDestroy() {
     stopped = true
     handler.removeCallbacks(tick)
+    wakeLock?.let { if (it.isHeld) it.release() }
+    wakeLock = null
     liveJson = "{}"
     displayLocation = null
     manager.removeUpdates(this)

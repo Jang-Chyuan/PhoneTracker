@@ -6,6 +6,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <application android:label="PhoneTracker" android:icon="@drawable/ic_location"
         android:theme="@style/AppTheme" android:allowBackup="false" android:supportsRtl="true">
         <meta-data android:name="com.google.android.geo.API_KEY" android:value="${googleMapsApiKey}" />
@@ -15,6 +16,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <service android:name=".location.LocationTrackerService" android:exported="false" android:foregroundServiceType="location" />
+        <service android:name=".location.LocationTrackerService" android:exported="false"
+            android:stopWithTask="false" android:foregroundServiceType="location" />
+        <provider android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.mapexports"
+            android:exported="false" android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/map_export_paths" />
+        </provider>
     </application>
 </manifest>
