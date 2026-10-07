@@ -1,0 +1,84 @@
+name: PhoneTracker
+options:
+  bundleIdPrefix: com.phonetracker
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+packages:
+  GoogleMaps:
+    url: https://github.com/googlemaps/ios-maps-sdk
+    from: 11.2.0
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # Set your Apple ID team in Xcode (Signing & Capabilities); a free Personal Team works.
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+targets:
+  PhoneTracker:
+    type: application
+    platform: iOS
+    sources:
+      - PhoneTracker
+      - Shared
+    configFiles:
+      Debug: Config.xcconfig
+      Release: Config.xcconfig
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.phonetracker.ios
+        TARGETED_DEVICE_FAMILY: "1"
+        INFOPLIST_KEY_CFBundleDisplayName: PhoneTracker
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    info:
+      path: PhoneTracker/Info.plist
+      properties:
+        CFBundleDisplayName: PhoneTracker
+        GMSApiKey: $(GOOGLE_MAPS_IOS_API_KEY)
+        UILaunchScreen: {}
+        UIBackgroundModes: [location]
+        NSSupportsLiveActivities: true
+        NSLocationWhenInUseUsageDescription: PhoneTracker 需要精確位置，以在地圖上顯示手機位置並記錄軌跡；資料只保存在這支手機上。
+        NSLocationAlwaysAndWhenInUseUsageDescription: 選擇「永遠」可讓 PhoneTracker 在系統結束 App 後自動恢復背景軌跡記錄；資料只保存在這支手機上。
+        NSLocationTemporaryUsageDescriptionDictionary:
+          PreciseTracking: 軌跡記錄需要精確位置，僅概略位置無法記錄。
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+    dependencies:
+      - target: PhoneTrackerWidget
+      - package: GoogleMaps
+  PhoneTrackerWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - PhoneTrackerWidget
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.phonetracker.ios.widget
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) WIDGET_EXTENSION"
+    info:
+      path: PhoneTrackerWidget/Info.plist
+      properties:
+        CFBundleDisplayName: PhoneTracker
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+  PhoneTrackerTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [PhoneTrackerTests]
+    dependencies:
+      - target: PhoneTracker
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.phonetracker.ios.tests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  PhoneTracker:
+    build:
+      targets:
+        PhoneTracker: all
+    test:
+      targets: [PhoneTrackerTests]
