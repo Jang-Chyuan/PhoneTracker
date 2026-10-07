@@ -15,10 +15,13 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.LayerDrawable
 import android.location.LocationManager
 import android.os.*
 import android.provider.Settings
 import android.view.View
+import android.view.Gravity
 import android.view.WindowInsets
 import android.widget.*
 import androidx.core.content.ContextCompat
@@ -106,23 +109,32 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= 29) window.isNavigationBarContrastEnforced = false
         mapExporter.restoreState(savedInstanceState)
         hours = savedInstanceState?.getLong("hours", 6) ?: 6
         customStart = savedInstanceState?.getLong("start")?.takeIf { it > 0 }
         customEnd = savedInstanceState?.getLong("end")?.takeIf { it > 0 }
         savedInstanceState?.getStringArrayList("navigation")?.let { navigationStack.addAll(it) }
+        val screenBackground = LayerDrawable(arrayOf(
+            ColorDrawable(Color.rgb(248, 250, 252)), ColorDrawable(blue)
+        )).apply {
+            setLayerGravity(1, Gravity.BOTTOM)
+            setLayerHeight(1, 0)
+        }
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.rgb(248, 250, 252))
+            background = screenBackground
         }
         root.setOnApplyWindowInsetsListener { view, insets ->
             if (Build.VERSION.SDK_INT >= 30) {
                 val bars = insets.getInsets(WindowInsets.Type.systemBars())
                 view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+                screenBackground.setLayerHeight(1, bars.bottom)
             } else {
                 @Suppress("DEPRECATION")
                 view.setPadding(insets.systemWindowInsetLeft, insets.systemWindowInsetTop,
                     insets.systemWindowInsetRight, insets.systemWindowInsetBottom)
+                screenBackground.setLayerHeight(1, insets.systemWindowInsetBottom)
             }
             insets
         }
