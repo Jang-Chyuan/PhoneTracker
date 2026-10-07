@@ -25,6 +25,7 @@ import android.view.Gravity
 import android.view.WindowInsets
 import android.widget.*
 import androidx.core.content.ContextCompat
+import androidx.core.location.LocationManagerCompat
 import com.google.android.gms.maps.*
 import com.google.android.gms.maps.model.*
 import com.phonetracker.location.*
@@ -86,7 +87,9 @@ class MainActivity : Activity() {
     private var beforeId = 0L
     private val pageStack = mutableListOf<Long>()
     private var positionTimestamp = 0L
+    private var positionWasEligible = false
     private var requestStart = false
+    private var waitingForNotificationPermission = false
     private val preferences by lazy { getSharedPreferences("phone_location_recording", 0) }
     private val database by lazy { LocationTrackerStore.get(this) }
     private val mapExporter by lazy { MapExporter(this) }
@@ -109,6 +112,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        waitingForNotificationPermission = savedInstanceState?.getBoolean("waiting_notification", false) ?: false
         if (Build.VERSION.SDK_INT >= 29) window.isNavigationBarContrastEnforced = false
         mapExporter.restoreState(savedInstanceState)
         hours = savedInstanceState?.getLong("hours", 6) ?: 6
@@ -315,7 +319,7 @@ class MainActivity : Activity() {
         } else ensureLocation(true)
     }
     private fun ensureLocation(manual: Boolean) {
-        if (!resumed || LocationTrackerService.running || (!manual && !preferences.getBoolean("enabled", true))) return
+        if (!resumed || waitingForNotificationPermission || LocationTrackerService.running || (!manual && !preferences.getBoolean("enabled", true))) return
         if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             if (manual || !preferences.getBoolean("asked_permission", false)) {
                 requestStart = true
@@ -325,8 +329,8 @@ class MainActivity : Activity() {
             return
         }
         val manager = getSystemService(LocationManager::class.java)
-        if (!manager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-            if (manual) AlertDialog.Builder(this).setTitle("請開啟 GPS").setMessage("手機位置記錄需要精確位置與 GPS。")
+        if (!LocationManagerCompat.isLocationEnabled(manager)) {
+            if (manual) AlertDialog.Builder(this).setTitle("請開啟定位").setMessage("手機位置記錄需要精確位置與手機定位服務。")
                 .setPositiveButton("開啟設定") { _, _ -> startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)) }
                 .setNegativeButton("取消", null).show()
             return
@@ -334,7 +338,10 @@ class MainActivity : Activity() {
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
             && !preferences.getBoolean("asked_notification", false)) {
             preferences.edit().putBoolean("asked_notification", true).apply()
+            if (manual) preferences.edit().putBoolean("enabled", true).apply()
+            waitingForNotificationPermission = true
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 11)
+            return
         }
         if (manual) preferences.edit().putBoolean("enabled", true).apply()
         try { ContextCompat.startForegroundService(this, Intent(this, LocationTrackerService::class.java)) }
@@ -342,11 +349,21 @@ class MainActivity : Activity() {
     }
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 11) {
+            waitingForNotificationPermission = false
+            ensureLocation(false)
+            refreshRecordingNotification()
+        }
         if (requestCode == 10 && requestStart) {
             requestStart = false
             if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) ensureLocation(true)
             else Toast.makeText(this, "請允許精確位置，僅概略位置無法記錄", Toast.LENGTH_LONG).show()
         }
+    }
+    private fun refreshRecordingNotification() {
+        if (!resumed || !LocationTrackerService.running ||
+            (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)) return
+        startService(Intent(this, LocationTrackerService::class.java).setAction(LocationTrackerService.REFRESH_NOTIFICATION))
     }
     private fun updateLive() {
         if (destroyed) return
@@ -359,28 +376,34 @@ class MainActivity : Activity() {
         val live = try { JSONObject(LocationTrackerService.liveJson) } catch (_: Exception) { JSONObject() }
         val position = live.optJSONObject("position")
         if (position == null) {
+            positionWasEligible = false
             detailText.text = if (!LocationTrackerService.running) "即時位置尚未啟動，請按「開始記錄」取得手機位置"
                 else if (!BuildConfig.GOOGLE_MAPS_CONFIGURED) "尚未設定 Google Maps 金鑰；GPS 記錄仍可使用"
-                else "等待合格定位 · 精度需 ≤ 30 m，高速需 < 50 m"
+                else "等待融合定位 · 軌跡精度需 ≤ 30 m，高速需 < 50 m"
             return
         }
         val age = live.optDouble("ageSeconds", Double.POSITIVE_INFINITY)
+        val recordingEligible = position.optBoolean("recordingEligible")
+        if (!recordingEligible) LocationTrackerService.displayLocation = null
         val speed = position.optDouble("speedKmh", Double.NaN)
         detailText.text = "${format.format(Date(position.optLong("timestamp")))} · 精度 ${position.optDouble("accuracy").toInt()} m · " +
             (if (speed.isFinite()) String.format(Locale.TAIWAN, "%.1f km/h", speed) else "速度未知") +
             "\n已保存 ${live.optInt("saved")} 筆 · 間隔 ${live.optInt("intervalSeconds", 30)} 秒" +
-            (if (age > 3) " · 最後位置已過期" else "")
+            (if (recordingEligible) " · 合格定位" else " · 估算位置，未寫入軌跡") +
+            (if (age > 30) " · 最後位置已過期" else "")
         val googleMap = map ?: return
         val target = LatLng(position.getDouble("latitude"), position.getDouble("longitude"))
         if (marker == null) marker = googleMap.addMarker(MarkerOptions().position(target).title("手機位置")
             .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE)))
-        marker?.alpha = if (age > 3) 0.45f else 1f
+        marker?.alpha = if (age > 30) 0.45f else 1f
         marker?.snippet = "${format.format(Date(position.optLong("timestamp")))} · 精度 ${position.optDouble("accuracy").toInt()} m"
         val stamp = position.optLong("timestamp")
         if (stamp != positionTimestamp) {
             positionTimestamp = stamp
             animator?.cancel()
-            val origin = marker?.position ?: target
+            // An indoor estimate must not enter saved coordinates through map animation.
+            val origin = if (recordingEligible && positionWasEligible) marker?.position ?: target else target
+            positionWasEligible = recordingEligible
             val longitudeDelta = ((target.longitude - origin.longitude + 540) % 360) - 180
             val session = live.optString("sessionId")
             animator = ValueAnimator.ofFloat(0f, 1f).apply {
@@ -390,7 +413,7 @@ class MainActivity : Activity() {
                     val coordinate = LatLng(origin.latitude + (target.latitude - origin.latitude) * fraction,
                         origin.longitude + longitudeDelta * fraction)
                     marker?.position = coordinate
-                    if (resumed && age <= 3) LocationTrackerService.displayLocation = DisplayLocation(session, stamp,
+                    if (resumed && age <= 3 && recordingEligible) LocationTrackerService.displayLocation = DisplayLocation(session, stamp,
                         coordinate.latitude, coordinate.longitude, SystemClock.elapsedRealtimeNanos())
                 }
                 start()
@@ -398,7 +421,7 @@ class MainActivity : Activity() {
             if (circle == null) circle = googleMap.addCircle(CircleOptions().center(target).radius(position.optDouble("accuracy"))
                 .strokeColor(0x552563EB).fillColor(0x182563EB).strokeWidth(2f))
             circle?.center = target; circle?.radius = position.optDouble("accuracy")
-            if (following && age <= 3) googleMap.animateCamera(CameraUpdateFactory.newLatLngZoom(target,
+            if (following && age <= 30) googleMap.animateCamera(CameraUpdateFactory.newLatLngZoom(target,
                 if (googleMap.cameraPosition.zoom < 14) 17f else googleMap.cameraPosition.zoom))
         }
     }
@@ -598,6 +621,7 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume(); mapView.onResume(); resumed = true
         ensureLocation(false)
+        refreshRecordingNotification()
         handler.removeCallbacks(tick); handler.post(tick)
     }
     override fun onPause() {
@@ -613,6 +637,7 @@ class MainActivity : Activity() {
     override fun onLowMemory() { super.onLowMemory(); mapView.onLowMemory() }
     override fun onSaveInstanceState(outState: Bundle) {
         mapExporter.saveState(outState)
+        outState.putBoolean("waiting_notification", waitingForNotificationPermission)
         outState.putStringArrayList("navigation", navigationStack)
         outState.putString("mode", mode); outState.putLong("hours", hours)
         customStart?.let { outState.putLong("start", it) }; customEnd?.let { outState.putLong("end", it) }
