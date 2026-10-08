@@ -73,3 +73,7 @@ GOOGLE_MAPS_ANDROID_API_KEY=YOUR_ANDROID_MAPS_KEY
 | `location/LocationPipeline.kt` | 樣本接受、平滑、記錄間隔 |
 | `location/MotionDetector.kt` | 移動／靜止判定 |
 | `app/src/test` | 沿用定位管線測試與新增歷史幾何測試 |
+
+## iOS 版
+
+iOS 版位於 [`ios/`](ios/README.md)，使用 SwiftUI 與 Google Maps SDK for iOS，定位管線與資料庫規則和本 Android 版相同。安裝說明見 [`ios/INSTALL.md`](ios/INSTALL.md)，兩版並排比較見 [`docs/ios-android-comparison`](docs/ios-android-comparison/README.md)。
