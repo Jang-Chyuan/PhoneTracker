@@ -46,6 +46,7 @@ final class AppModel: ObservableObject {
   private var cursorDragging = false
   private var cursorPoints: [TrackPoint] = []
   private var positionTimestamp: Int64 = 0
+  private var positionWasEligible = false
   private var requestStart = false
   private var exporting = false
   private var toastTask: Task<Void, Never>?
@@ -209,28 +210,35 @@ final class AppModel: ObservableObject {
     statusText = (live.running ? "● 記錄中 · " : "○ ") + live.status
     guard mode == .live else { return }
     guard let position = live.position else {
+      positionWasEligible = false
       detailText = !live.running ? "即時位置尚未啟動，請按「開始記錄」取得手機位置"
         : !GoogleMapsKey.configured ? "尚未設定 Google Maps 金鑰；GPS 記錄仍可使用"
-        : "等待合格定位 · 精度需 ≤ 30 m，高速需 < 50 m"
+        : "等待融合定位 · 軌跡精度需 ≤ 30 m，高速需 < 50 m"
       return
     }
     let age = live.ageSeconds ?? .infinity
+    let recordingEligible = position.recordingEligible
+    if !recordingEligible { tracker.displayLocation = nil }
     let speed = position.speedKmh.map { String(format: "%.1f km/h", $0) } ?? "速度未知"
     detailText = "\(date(position.timestamp)) · 精度 \(Int(position.accuracy)) m · \(speed)" +
-      "\n已保存 \(live.saved) 筆 · 間隔 \(live.intervalSeconds) 秒" + (age > 3 ? " · 最後位置已過期" : "")
+      "\n已保存 \(live.saved) 筆 · 間隔 \(live.intervalSeconds) 秒" +
+      (recordingEligible ? " · 合格定位" : " · 估算位置，未寫入軌跡") + (age > 30 ? " · 最後位置已過期" : "")
     let target = CLLocationCoordinate2D(latitude: position.latitude, longitude: position.longitude)
-    map.updateLiveMarker(target: target, title: "手機位置", snippet: "\(date(position.timestamp)) · 精度 \(Int(position.accuracy)) m", stale: age > 3)
+    map.updateLiveMarker(target: target, title: "手機位置", snippet: "\(date(position.timestamp)) · 精度 \(Int(position.accuracy)) m", stale: age > 30)
     let stamp = position.timestamp
     if stamp != positionTimestamp {
       positionTimestamp = stamp
       let session = live.sessionId
-      map.animateMarker(to: target) { [weak self] coordinate in
-        guard let self, self.active, age <= 3 else { return }
+      // An indoor estimate must not enter saved coordinates through map animation.
+      let jump = !(recordingEligible && positionWasEligible)
+      positionWasEligible = recordingEligible
+      map.animateMarker(to: target, jump: jump) { [weak self] coordinate in
+        guard let self, self.active, age <= 3, recordingEligible else { return }
         self.tracker.displayLocation = DisplayLocation(session: session, fixTime: stamp, latitude: coordinate.latitude,
                                                        longitude: coordinate.longitude, receivedNanos: monotonicNanos())
       }
       map.setAccuracyCircle(center: target, radius: Double(position.accuracy))
-      if following && age <= 3 { map.move(to: target, zoom: map.zoom < 14 ? 17 : map.zoom, animated: true) }
+      if following && age <= 30 { map.move(to: target, zoom: map.zoom < 14 ? 17 : map.zoom, animated: true) }
     }
   }
 

@@ -95,10 +95,10 @@ struct ContentView: View {
     }
     .animation(.default, value: model.toast)
     .onChange(of: scenePhase, initial: true) { _, phase in model.setActive(phase == .active) }
-    .alert("請開啟 GPS", isPresented: $model.gpsAlert) {
+    .alert("請開啟定位", isPresented: $model.gpsAlert) {
       Button("開啟設定") { openSettings() }
       Button("取消", role: .cancel) {}
-    } message: { Text("手機位置記錄需要精確位置與 GPS。請到「設定 › 隱私權與安全性 › 定位服務」開啟。") }
+    } message: { Text("手機位置記錄需要精確位置與手機定位服務。請到「設定 › 隱私權與安全性 › 定位服務」開啟。") }
     .alert("需要精確位置", isPresented: Binding(get: { model.settingsAlert != nil }, set: { if !$0 { model.settingsAlert = nil } })) {
       Button("開啟設定") { openSettings() }
       Button("取消", role: .cancel) {}

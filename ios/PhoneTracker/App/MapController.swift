@@ -85,10 +85,11 @@ final class MapController: NSObject, GMSMapViewDelegate {
   }
 
   /// Animate to a new fix over 900 ms, reporting each frame's coordinate (Android ValueAnimator).
-  func animateMarker(to target: CLLocationCoordinate2D, frame: @escaping (CLLocationCoordinate2D) -> Void) {
+  /// `jump` starts the animation at the target, so an estimate never slides into saved coordinates.
+  func animateMarker(to target: CLLocationCoordinate2D, jump: Bool = false, frame: @escaping (CLLocationCoordinate2D) -> Void) {
     guard let marker else { return }
     displayLink?.invalidate()
-    let origin = marker.position
+    let origin = jump ? target : marker.position
     let longitudeDelta = (target.longitude - origin.longitude + 540).truncatingRemainder(dividingBy: 360) - 180
     animation = (origin, target, longitudeDelta, CACurrentMediaTime(), frame)
     let link = CADisplayLink(target: self, selector: #selector(step))

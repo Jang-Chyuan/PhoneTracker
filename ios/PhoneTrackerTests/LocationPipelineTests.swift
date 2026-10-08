@@ -254,3 +254,45 @@ final class DisplayLocationTests: XCTestCase {
     ("testRejectsStaleFutureAndPreviousSessionDisplayCoordinates", testRejectsStaleFutureAndPreviousSessionDisplayCoordinates),
   ]
 }
+
+final class LocationPreviewTests: XCTestCase {
+  func testIndoorEstimateDisplaysWithoutBecomingARecordingCandidate() {
+    let preview = LocationPreview()
+    let pipeline = LocationPipeline()
+    let indoor = LocationSample(25.0, 121.0, 150, 10_000_000_000, 10000)
+    XCTAssertTrue(preview.accept(indoor, now: indoor.elapsedNanos))
+    XCTAssertFalse(pipeline.accept(indoor, now: indoor.elapsedNanos))
+    XCTAssertEqual(preview.latest, indoor)
+    XCTAssertNil(pipeline.candidate(now: indoor.elapsedNanos))
+
+    var precise = indoor; precise.accuracy = 10; precise.elapsedNanos = 11_000_000_000; precise.timestamp = 11000
+    XCTAssertTrue(preview.accept(precise, now: precise.elapsedNanos))
+    XCTAssertTrue(pipeline.accept(precise, now: precise.elapsedNanos))
+    XCTAssertNotNil(pipeline.candidate(now: precise.elapsedNanos))
+
+    var uncertain = indoor; uncertain.elapsedNanos = 15_000_000_000; uncertain.timestamp = 15000
+    XCTAssertTrue(preview.accept(uncertain, now: uncertain.elapsedNanos))
+    XCTAssertFalse(pipeline.accept(uncertain, now: uncertain.elapsedNanos))
+    XCTAssertEqual(preview.latest, uncertain)
+    XCTAssertNil(pipeline.candidate(now: uncertain.elapsedNanos))
+  }
+  func testRejectsInvalidStaleFutureAndOutOfOrderEstimates() {
+    let preview = LocationPreview()
+    let now: Int64 = 40_000_000_000
+    let sample = LocationSample(25.0, 121.0, 200, now, 40000)
+    var s = sample; s.latitude = 91; XCTAssertFalse(preview.accept(s, now: now))
+    s = sample; s.longitude = .nan; XCTAssertFalse(preview.accept(s, now: now))
+    s = sample; s.accuracy = .nan; XCTAssertFalse(preview.accept(s, now: now))
+    s = sample; s.accuracy = -1; XCTAssertFalse(preview.accept(s, now: now))
+    s = sample; s.elapsedNanos = now + 1; XCTAssertFalse(preview.accept(s, now: now))
+    s = sample; s.elapsedNanos = 1; XCTAssertFalse(preview.accept(s, now: now))
+    XCTAssertTrue(preview.accept(sample, now: now))
+    XCTAssertFalse(preview.accept(sample, now: now))
+    s = sample; s.elapsedNanos = now - 1; XCTAssertFalse(preview.accept(s, now: now))
+    XCTAssertEqual(preview.latest, sample)
+  }
+  static let allTests = [
+    ("testIndoorEstimateDisplaysWithoutBecomingARecordingCandidate", testIndoorEstimateDisplaysWithoutBecomingARecordingCandidate),
+    ("testRejectsInvalidStaleFutureAndOutOfOrderEstimates", testRejectsInvalidStaleFutureAndOutOfOrderEstimates),
+  ]
+}

@@ -8,6 +8,8 @@ func monotonicNanos() -> Int64 { Int64(clock_gettime_nsec_np(CLOCK_MONOTONIC)) }
 struct LivePosition: Equatable {
   var latitude: Double, longitude: Double, timestamp: Int64, accuracy: Float
   var speedKmh: Double?, rawSpeedKmh: Double?, speedAccuracyMps: Float?, motionState: String, bearing: Float?
+  /// False for an estimate shown on the map that did not pass the recording checks.
+  var recordingEligible = false
 }
 
 struct LiveStatus: Equatable {
@@ -32,6 +34,7 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
   private var timer: DispatchSourceTimer?
   private var store: LocationTrackerStore?
   private var pipeline = LocationPipeline()
+  private var preview = LocationPreview()
   private var sessionId = UUID().uuidString
   private var saved = 0
   private var writeErrors = 0
@@ -76,16 +79,17 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
     if running { return nil }
     let status = manager.authorizationStatus
     guard status == .authorizedAlways || (status == .authorizedWhenInUse && !fromBackground) else {
-      setStatus("無法開始記錄，請允許精確位置並開啟 GPS"); return "請允許位置權限"
+      setStatus("無法開始記錄，請允許精確位置並開啟手機定位"); return "請允許位置權限"
     }
     guard manager.accuracyAuthorization == .fullAccuracy else {
-      setStatus("無法開始記錄，請允許精確位置並開啟 GPS"); return "請允許精確位置，僅概略位置無法記錄"
+      setStatus("無法開始記錄，請允許精確位置並開啟手機定位"); return "請允許精確位置，僅概略位置無法記錄"
     }
     guard CLLocationManager.locationServicesEnabled() else {
-      setStatus("無法開始記錄，請允許精確位置並開啟 GPS"); return "請開啟手機定位服務"
+      setStatus("無法開始記錄，請允許精確位置並開啟手機定位"); return "請開啟手機定位服務"
     }
     worker.sync {
       pipeline = LocationPipeline()
+      preview = LocationPreview()
       sessionId = UUID().uuidString
       saved = 0; writeErrors = 0; stopped = false
     }
@@ -147,17 +151,25 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         pipeline.written(sample, now: now); saved += 1
       } catch { writeErrors += 1; writeFailed = true }
     }
-    let latest = pipeline.latest
+    let estimate = preview.latest
+    let eligible = estimate != nil && estimate?.elapsedNanos == pipeline.latest?.elapsedNanos
+    let latest = eligible ? pipeline.latest : estimate
     let age = latest.map { Double(now - $0.elapsedNanos) / 1e9 }
     if writeFailed { status = "Timeline 寫入失敗，下一秒重試" }
-    else { status = (age ?? 0) > 3 ? "等待合格新定位；最後位置已過期" : pipeline.reason }
+    else if let age {
+      status = age > 30 ? "最後位置已過期，等待新定位"
+        : !eligible ? "估算位置，未寫入軌跡；\(pipeline.reason)"
+        : age > 3 ? "等待合格新定位；最後合格位置已過期"
+        : pipeline.reason
+    } else { status = "等待融合定位" }
     var value = LiveStatus(running: true, status: status, received: pipeline.received, accepted: pipeline.accepted,
                            rejected: pipeline.rejected, saved: saved, writeErrors: writeErrors, ageSeconds: age,
                            intervalSeconds: pipeline.intervalSeconds, sessionId: sessionId)
     if let latest {
       value.position = LivePosition(latitude: latest.latitude, longitude: latest.longitude, timestamp: latest.timestamp,
         accuracy: latest.accuracy, speedKmh: latest.speed.map { Double($0) * 3.6 }, rawSpeedKmh: latest.rawSpeed.map { Double($0) * 3.6 },
-        speedAccuracyMps: latest.speedAccuracy, motionState: (age ?? 0) > 3 ? "unknown" : latest.motionState, bearing: latest.bearing)
+        speedAccuracyMps: latest.speedAccuracy, motionState: (age ?? 0) > 3 ? "unknown" : latest.motionState, bearing: latest.bearing,
+        recordingEligible: eligible && (age ?? .infinity) <= 3)
     }
     lock.lock(); if _live.running { _live = value }; lock.unlock()
   }
@@ -179,7 +191,11 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
     }
     worker.async { [self] in
       if stopped { return }
-      for sample in samples { pipeline.accept(sample, now: monotonicNanos()) }
+      for sample in samples {
+        let now = monotonicNanos()
+        preview.accept(sample, now: now)
+        if !pipeline.accept(sample, now: now) { displayLocation = nil }
+      }
     }
   }
 

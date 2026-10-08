@@ -32,7 +32,7 @@ PhoneTracker 的 iOS 版（SwiftUI + CoreLocation + Google Maps SDK for iOS）�
 
 ## 與 Android 版一致的部分
 
-- 定位管線：`Core/LocationPipeline.swift`、`MotionDetector.swift`、`LocationAccuracy.swift`、`DisplayLocation.swift`。精度、速度型別都用 `Float`，和 Kotlin 一樣，邊界判斷結果也相同。
+- 定位管線：`Core/LocationPipeline.swift`、`MotionDetector.swift`、`LocationAccuracy.swift`、`DisplayLocation.swift`、`LocationPreview.swift`。精度不足的估算位置仍顯示在地圖並標示「估算位置，未寫入軌跡」，超過 30 秒才標示過期，與 Android 融合定位版相同。精度、速度型別都用 `Float`，和 Kotlin 一樣，邊界判斷結果也相同。
 - 記錄：每秒檢查一次，速度 ≤ 10 km/h 每 30 秒保存，> 10～20 每 5 秒，> 20 每秒；無新合格定位不補寫。
 - 資料庫：`phonetracker.sqlite`，表格與欄位跟 Android 相同。寫入與修剪在同一個交易內，最多保留 80,000 筆。
 - 即時地圖：顯示手機位置、精度圈、900 ms 移動動畫，以及「即時位置」恢復跟隨。手動拖動地圖會停止跟隨。地圖上的動畫座標會在仍有效時寫入資料庫。
@@ -55,7 +55,7 @@ Android 的「記錄清單」頁在 Android 版裡沒有入口可以進去，所
 
 ## 模擬器驗收結果（iOS 27 模擬器，iPhone 18 Pro）
 
-- 單元測試 21 項全部通過（Xcode 與 `scripts/test-core.sh`）。
+- 單元測試 23 項全部通過（Xcode 與 `scripts/test-core.sh`）。
 - 權限：拒絕時顯示說明並可開啟設定；首次允許後自動開始記錄，接著詢問「永遠」。
 - 記錄間隔（直接讀資料庫核對）：72 km/h 約每 1 秒、14.4 km/h 約每 5 秒、0.7 km/h 每 30 秒；螢幕開著時保存地圖動畫座標，背景時保存管線座標。
 - 回主畫面與鎖屏時持續記錄；鎖定畫面與動態島顯示記錄卡片，「停止記錄」可停止且重開 App 後維持停止。
